@@ -1,8 +1,152 @@
-meme_dict = {
-            "КРИНЖ": "Что-то очень странное или стыдное",
-            "ЛОЛ": "Что-то очень смешное"
+const ModbusRTU = require("modbus-serial");
+const client = new ModbusRTU();
+ 
+// Параметры подключения
+const SERIAL_PORT = "/dev/tty.usbserial-3230";
+const BAUD_RATE = 9600;
+const DATA_BITS = 8;  // Количество бит данных
+const STOP_BITS = 2;  // Количество стоп-битов
+const PARITY = "none"; // Четность ("none", "even", "odd")
+ 
+const MODBUS_DEVICE_ID = 1; // Адрес Modbus-устройства
+const MODBUS_TIMEOUT = 500; // Тайм-аут (в миллисекундах)
+ 
+// Структура с регистрами и их описанием
+const REGISTERS = {
+    STATUS: {address: 0x3000, name: "Текущий статус двигателя: 1 - FWD / 2 - REV / 3 - STOP"},
+    FREQUENCY: {address: 0x1001, name: "Текущая частота *100", unit: "Hz", name_en: "Operating frequency"},
+    VOLTAGE: {address: 0x1002, name: "Входное напряжение *10", unit: "V", name_en: "Bus voltage"},
+    VOLTAGE_MOTOR: {address: 0x1003, name: "Напряжение на моторе", unit: "V", name_en: "Output voltage"},
+    CURRENT_MOTOR: {address: 0x1004, name: "Ток на обмотке мотора *100", unit: "A", name_en: "Output current"},
+    POWER: {address: 0x1005, name: "Выходная мощность *100", unit: "W", name_en: "Output power"},
+    TORQUE: {address: 0x1006, name: "Выходной крутящий момент", unit: "N·m", name_en: "Output torque"},
+    OUTPUT_FREQUENCY: {address: 0x1007, name: "Скорость вращения *100", unit: "Hz", name_en: "Running speed"},
+    ERROR: {address: 0x8000, name: "Код ошибки", name_en: "Inverter fault address"},
+    MOTOR_START_COMMANDS: {address: 0xF002, name: "Источник команд запуска мотора: 3 - RS-485"},
+    MOTOR_SPEED_COMMANDS: {address: 0xF003, name: "Источник команд скорости мотора: 9 - RS-485"},
+    INPUT_VOLTAGE: {address: 0xF202, name: "Источник питания инвертора 220 / 380", unit: "V"},
+    SPEED: {address: 0x1000, name: "Скорость вращения *100", unit: "%"}
+};
+ 
+// Регистр команд на запуск и остановку двигателя
+const REG_COMMAND = 0x2000;
+ 
+// Команды управления двигателем
+const CMD_START_FWD = 0x0001; // Запуск двигателя вперед
+const CMD_START_REV = 0x0002; // Реверс двигателя
+const CMD_STOP = 0x0006; // Остановка двигателя
+ 
+const LINE = "##########################################################################################################################";
+ 
+ 
+// Функция для поиска ключа (названия параметра) по объекту регистра
+function getRegisterKey(registerInfo) {
+    return Object.keys(REGISTERS).find(key => REGISTERS[key] === registerInfo) || "UNKNOWN";
+}
+ 
+ 
+// Функция ожидания
+async function waitSeconds(mSeconds = 10) {
+    console.log(`Ожидание ${mSeconds} секунд`);
+    return new Promise(resolve => setTimeout(resolve, mSeconds * 1000));
+}
+ 
+ 
+// Функция для чтения регистра Modbus с повторной попыткой
+async function readModbusRegister(registerInfo, maxRetries = 2) {
+    let attempt = 0;
+    const registerKey = getRegisterKey(registerInfo); // Получаем название параметра
+ 
+    while (attempt < maxRetries) {
+        try {
+            const response = await client.readHoldingRegisters(registerInfo.address, 1);
+            console.log(`# read # ${registerKey} (${registerInfo.name}): ${response.data[0]} ${registerInfo.unit || ""}`);
+            return response.data[0]; // Успешное чтение
+        } catch (error) {
+            //console.error(`# Ошибка чтения ${registerKey}, попытка ${attempt + 1}`);
+            attempt++;
+            if (attempt < maxRetries) {
+                //console.log(`# Повторная попытка чтения ${registerKey}`);
+                await new Promise(resolve => setTimeout(resolve, 500)); // Ожидание перед повторной попыткой
+            } else {
+                console.error(`# Не удалось прочитать [${registerKey}] ${registerInfo.name} после ${maxRetries} попыток.`);
+                return null;
             }
-meme = input("Введите непонятное слово (большими буквами!): ")
-for i in meme_dict.values():
-    if i == meme:
-        print(meme_dict[])
+        }
+    }
+}
+ 
+ 
+// Функция для записи регистра Modbus
+async function writeModbusRegister(registerInfo, registerValue) {
+    const registerKey = getRegisterKey(registerInfo); // Получаем название параметра
+ 
+    try {
+        await client.writeRegister(registerInfo.address, registerValue);
+        console.log(`# write # ${registerKey} (${registerInfo.name}): ${registerValue}`);
+        return 0; // Успешная запись
+    } catch (error) {
+        console.error(`# Ошибка записи ${registerKey}, ошибка: `, error);
+        return null;
+    }
+}
+ 
+ 
+async function run() {
+    try {
+        // Подключение к Modbus-RTU с нужными параметрами
+        await client.connectRTU(SERIAL_PORT, {
+            baudRate: BAUD_RATE,
+            dataBits: DATA_BITS,
+            stopBits: STOP_BITS,
+            parity: PARITY
+        });
+ 
+        console.log(LINE);
+ 
+        client.setID(MODBUS_DEVICE_ID); // Устанавливаем адрес инвертора
+        client.setTimeout(MODBUS_TIMEOUT); // Устанавливаем тайм-аут ожидания ответа
+        console.log("Подключились к инвертору по Modbus-RTU");
+ 
+        console.log(LINE);
+ 
+        await writeModbusRegister(REGISTERS["INPUT_VOLTAGE"], 220); // Выбрали что у нас на входе в инвертор напряжение 220V
+        await writeModbusRegister(REGISTERS["MOTOR_START_COMMANDS"], 2); // Выбрали RS485 в качестве источника команд
+        await writeModbusRegister(REGISTERS["MOTOR_SPEED_COMMANDS"], 9); // Выбрали RS485 в качестве источника скорости
+        await writeModbusRegister(REGISTERS["SPEED"], 1000); // 10% скорости вращения
+ 
+        console.log("Запускаем двигатель FWD");
+        await client.writeRegister(REG_COMMAND, CMD_START_FWD);
+        await waitSeconds();
+ 
+        console.log(LINE);
+ 
+        // Читаем все параметры
+        for (const key in REGISTERS) {
+            await readModbusRegister(REGISTERS[key]);
+        }
+ 
+        console.log(LINE);
+ 
+        console.log("Запускаем двигатель REV");
+        await client.writeRegister(REG_COMMAND, CMD_START_REV);
+        await waitSeconds();
+ 
+        console.log(LINE);
+ 
+        console.log("Останавливаем двигатель");
+        await client.writeRegister(REG_COMMAND, CMD_STOP);
+ 
+        console.log(LINE);
+ 
+        // Закрываем соединение
+        client.close();
+        console.log("Соединение закрыто");
+    } catch (error) {
+        console.error("Ошибка:", error);
+        client.close();
+    }
+}
+ 
+// Запускаем процесс
+run();
